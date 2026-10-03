@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -30,6 +31,8 @@ class TaskSubmit(BaseModel):
     parameters: dict[str, Any]
     priority: int = Field(default=50, ge=0, le=100)
     idempotency_key: str = Field(min_length=6, max_length=160)
+    event_starts_at: datetime | None = Field(default=None, description="场次开场时间，用于临近开场紧急度")
+    required_skill: str = Field(default="", max_length=80, description="承接该订单所需的人员技能")
 
 
 class TaskClaim(BaseModel):
@@ -66,6 +69,13 @@ class PriorityRequest(BaseModel):
     actor: str = Field(min_length=1, max_length=120)
     reason: str = Field(min_length=2, max_length=1000)
     priority: int = Field(ge=0, le=100)
+
+
+class BoostRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=120)
+    reason: str = Field(min_length=2, max_length=1000, description="临时加权原因，会写入审计")
+    points: int = Field(ge=1, le=40, description="临时增加的分值")
+    ttl_seconds: int = Field(default=1800, ge=60, le=7200, description="加权有效期，到期自动失效")
 
 
 class BatchOperation(BaseModel):

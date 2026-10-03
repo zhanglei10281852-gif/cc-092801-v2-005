@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.compute.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
+from app.compute.schemas import BatchOperation, BoostRequest, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
 from app.compute.service import ComputeOperationsService
 
 router = APIRouter(prefix="/api/compute", tags=["仪式服务订单运营"])
@@ -75,6 +75,17 @@ def retry_task(task_id: int, payload: RetryRequest):
 @router.post("/tasks/{task_id}/priority")
 def set_priority(task_id: int, payload: PriorityRequest):
     return service().set_priority(task_id, payload.actor, payload.reason, payload.priority)
+
+
+@router.post("/tasks/{task_id}/boost")
+def boost_task(task_id: int, payload: BoostRequest):
+    return service().boost(task_id, payload.actor, payload.reason, payload.points, payload.ttl_seconds)
+
+
+@router.get("/queue/preview")
+def queue_preview(capabilities: str = "", limit: int = Query(default=20, ge=1, le=200)):
+    skills = [item.strip() for item in capabilities.split(",") if item.strip()]
+    return {"items": service().queue_preview(skills, limit)}
 
 
 @router.post("/tasks/batch")

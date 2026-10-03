@@ -261,6 +261,9 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     current_result_version INTEGER,
     last_error_code TEXT NOT NULL DEFAULT '',
     last_error_message TEXT NOT NULL DEFAULT '',
+    event_starts_at TEXT NOT NULL DEFAULT '',
+    required_skill TEXT NOT NULL DEFAULT '',
+    queue_rank_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     started_at TEXT,
     finished_at TEXT,
@@ -293,6 +296,28 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+
+CREATE TABLE IF NOT EXISTS compute_boosts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    points INTEGER NOT NULL CHECK(points BETWEEN 1 AND 40),
+    reason TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_boosts_active ON compute_boosts(task_id,expires_at);
+
+CREATE TABLE IF NOT EXISTS compute_claim_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL,
+    score_total INTEGER NOT NULL,
+    score_breakdown_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_claim_events_task ON compute_claim_events(task_id,id);
 '''
 
 PERMISSIONS = [
@@ -359,10 +384,56 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate_compute_scheduling(connection: sqlite3.Connection) -> None:
+    """为已存在的库补齐排班字段与补偿表（幂等）。"""
+    existing = _column_names(connection, "compute_tasks")
+    additions = {
+        "event_starts_at": "TEXT NOT NULL DEFAULT ''",
+        "required_skill": "TEXT NOT NULL DEFAULT ''",
+        "queue_rank_at": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE compute_tasks ADD COLUMN {name} {declaration}")
+    # 历史排队订单：以创建时间作为初始排队基准，避免升级瞬间补偿权重归零。
+    if "queue_rank_at" not in existing:
+        connection.execute("UPDATE compute_tasks SET queue_rank_at=created_at WHERE queue_rank_at IS NULL")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_compute_tasks_queue_rank ON compute_tasks(status,queue_rank_at)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS compute_boosts ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,"
+        "points INTEGER NOT NULL CHECK(points BETWEEN 1 AND 40),"
+        "reason TEXT NOT NULL,"
+        "expires_at TEXT NOT NULL,"
+        "created_by TEXT NOT NULL,"
+        "created_at TEXT NOT NULL)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_compute_boosts_active ON compute_boosts(task_id,expires_at)")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS compute_claim_events ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,"
+        "worker_id TEXT NOT NULL,"
+        "attempt_no INTEGER NOT NULL,"
+        "score_total INTEGER NOT NULL,"
+        "score_breakdown_json TEXT NOT NULL,"
+        "created_at TEXT NOT NULL)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_compute_claim_events_task ON compute_claim_events(task_id,id)")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _migrate_compute_scheduling(connection)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
