@@ -261,6 +261,12 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     current_result_version INTEGER,
     last_error_code TEXT NOT NULL DEFAULT '',
     last_error_message TEXT NOT NULL DEFAULT '',
+    urgency INTEGER NOT NULL DEFAULT 3 CHECK(urgency BETWEEN 1 AND 5),
+    start_at TEXT NOT NULL DEFAULT '',
+    required_skill TEXT NOT NULL DEFAULT '',
+    min_skill_level INTEGER NOT NULL DEFAULT 1 CHECK(min_skill_level BETWEEN 1 AND 5),
+    queued_since TEXT NOT NULL DEFAULT '',
+    schedule_score REAL NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 1,
     started_at TEXT,
     finished_at TEXT,
@@ -270,6 +276,28 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_compute_tasks_queue ON compute_tasks(status,priority DESC,available_at,created_at);
 CREATE INDEX IF NOT EXISTS idx_compute_tasks_owner ON compute_tasks(requested_by,status,created_at);
+CREATE TABLE IF NOT EXISTS compute_priority_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    bonus REAL NOT NULL CHECK(bonus > 0 AND bonus <= 40),
+    reason TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_overrides_active ON compute_priority_overrides(task_id, active);
+CREATE TABLE IF NOT EXISTS compute_schedule_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER REFERENCES compute_tasks(id) ON DELETE SET NULL,
+    worker_id TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    breakdown_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_schedule_events_task ON compute_schedule_events(task_id,id);
 CREATE TABLE IF NOT EXISTS compute_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
@@ -385,7 +413,55 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO role_permissions(role_id,permission_id,granted_at) SELECT ?,id,? FROM permissions",
             (administrator, now),
         )
+        _migrate_compute_columns(connection)
 
 
 def migrate_db() -> None:
     init_db()
+
+
+def _migrate_compute_columns(connection: sqlite3.Connection) -> None:
+    """为基线之后新增的排班字段补齐列与表（对已存在的数据库幂等）。"""
+    # 注意：此处处于外层即时事务中，不能使用会隐式提交的 executescript。
+    connection.execute(
+        """
+CREATE TABLE IF NOT EXISTS compute_priority_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES compute_tasks(id) ON DELETE CASCADE,
+    bonus REAL NOT NULL CHECK(bonus > 0 AND bonus <= 40),
+    reason TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_compute_overrides_active ON compute_priority_overrides(task_id, active)")
+    connection.execute(
+        """
+CREATE TABLE IF NOT EXISTS compute_schedule_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER REFERENCES compute_tasks(id) ON DELETE SET NULL,
+    worker_id TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0,
+    breakdown_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+)
+"""
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_compute_schedule_events_task ON compute_schedule_events(task_id,id)")
+    existing = {row["name"] for row in connection.execute("PRAGMA table_info(compute_tasks)").fetchall()}
+    additions = {
+        "urgency": "ALTER TABLE compute_tasks ADD COLUMN urgency INTEGER NOT NULL DEFAULT 3",
+        "start_at": "ALTER TABLE compute_tasks ADD COLUMN start_at TEXT NOT NULL DEFAULT ''",
+        "required_skill": "ALTER TABLE compute_tasks ADD COLUMN required_skill TEXT NOT NULL DEFAULT ''",
+        "min_skill_level": "ALTER TABLE compute_tasks ADD COLUMN min_skill_level INTEGER NOT NULL DEFAULT 1",
+        "queued_since": "ALTER TABLE compute_tasks ADD COLUMN queued_since TEXT NOT NULL DEFAULT ''",
+        "schedule_score": "ALTER TABLE compute_tasks ADD COLUMN schedule_score REAL NOT NULL DEFAULT 0",
+    }
+    for name, statement in additions.items():
+        if name not in existing:
+            connection.execute(statement)

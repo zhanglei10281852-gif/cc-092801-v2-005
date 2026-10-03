@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.compute.schemas import BatchOperation, CancelRequest, PriorityRequest, QuotaSet, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
+from app.compute.schemas import BatchOperation, BoostRequest, CancelRequest, PriorityRequest, QuotaSet, QueuePreview, RetryRequest, TaskClaim, TaskFailure, TaskResult, TaskSubmit, TemplateCreate
 from app.compute.service import ComputeOperationsService
 
 router = APIRouter(prefix="/api/compute", tags=["仪式服务订单运营"])
@@ -44,7 +44,17 @@ def get_task(task_id: int):
 
 @router.post("/tasks/claim")
 def claim_task(payload: TaskClaim):
-    return {"task": service().claim(payload.worker_id, payload.capabilities, payload.lease_seconds)}
+    return {"task": service().claim(payload.worker_id, payload.capabilities, payload.lease_seconds, payload.skills)}
+
+
+@router.post("/queue/preview")
+def preview_queue(payload: QueuePreview):
+    return {"items": service().preview_queue(payload.capabilities, payload.skills, payload.limit)}
+
+
+@router.get("/schedule-events")
+def schedule_events(task_id: int | None = None, limit: int = Query(default=100, ge=1, le=500)):
+    return {"items": service().list_schedule_events(task_id=task_id, limit=limit)}
 
 
 @router.post("/tasks/{task_id}/heartbeat")
@@ -75,6 +85,11 @@ def retry_task(task_id: int, payload: RetryRequest):
 @router.post("/tasks/{task_id}/priority")
 def set_priority(task_id: int, payload: PriorityRequest):
     return service().set_priority(task_id, payload.actor, payload.reason, payload.priority)
+
+
+@router.post("/tasks/{task_id}/boost", status_code=201)
+def boost_task(task_id: int, payload: BoostRequest):
+    return service().boost(task_id, payload.actor, payload.reason, payload.bonus, payload.ttl_seconds)
 
 
 @router.post("/tasks/batch")
